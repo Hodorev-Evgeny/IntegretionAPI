@@ -1,7 +1,6 @@
 import os
 from dotenv import load_dotenv
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy_utils import database_exists, create_database
 
 
@@ -16,14 +15,13 @@ settings = {
 
 
 
-def get_engine(user:str, password:str, host:str, port:int, database:str) -> AsyncEngine:
+def get_engine(user:str, password:str, host:str, port:int, database:str):
     pgQuery = 'postgresql+asyncpg://{user}:{password}@{host}:{port}/{db}'.format(
         user=user, password=password, host=host, port=port, db=database
     )
 
     nrurl = pgQuery.replace('+asyncpg', '')
     if not database_exists(nrurl):
-        print(nrurl)
         create_database(nrurl)
 
     engine = create_async_engine(pgQuery)
@@ -40,6 +38,6 @@ def get_settings_from_engine():
                       settings['port'],
                       settings['pgdatabase'])
 
-def get_session() -> AsyncSession:
+def get_session():
     engine = get_settings_from_engine()
-    return sessionmaker(engine, expire_on_commit=False)
+    return async_sessionmaker(engine, expire_on_commit=False)
