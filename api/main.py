@@ -2,11 +2,15 @@ import csv
 import io
 
 import uvicorn
+from datetime import datetime
+from decimal import Decimal
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from sqlalchemy.orm import sessionmaker
 
 from api.models.item import Item
 from api.models.partners import Partners
+from api.models.sales import Sales
+
 from deps import *
 
 
@@ -73,6 +77,33 @@ async def create_item(
 
     return {"status": "ok", "message": "Partners add"}
 
+@app.post("/upload/sales")
+async def create_item(
+        session: SessionDep,
+        upsales: UploadFile = File(...),
+):
+    if not upsales.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Not a csv")
+    content = await upsales.read()
+    text = content.decode("utf-8")
+    csvfile = io.StringIO(text)
+    reader = csv.DictReader(csvfile)
+
+    cach = []
+    for row in reader:
+        sale = Sales(
+            doc_no=row["doc_no"],
+            sale_date=datetime.strptime(row["sale_date"], "%Y-%m-%d").date(),
+            partner_inn=row["partner_inn"],
+            item_code=row["item_code"],
+            qty=Decimal(row["qty"]),
+            price=Decimal(row["price"]),
+        )
+        cach.append(sale)
+    session.add_all(cach)
+    await session.commit()
+
+    return {"status": "ok", "message": "Sales add"}
 
 if __name__ == "__main__":
     uvicorn.run(app, port=8000)
