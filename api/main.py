@@ -6,6 +6,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from sqlalchemy.orm import sessionmaker
 
 from api.models.item import Item
+from api.models.partners import Partners
 from deps import *
 
 
@@ -45,8 +46,32 @@ async def create_item(
     session.add_all(cach)
     await session.commit()
 
-    return {"status": "ok", "message": "Item created"}
+    return {"status": "ok", "message": "Item add"}
 
+@app.post("/upload/partners")
+async def create_item(
+        session: SessionDep,
+        uppartners: UploadFile = File(...),
+):
+    if not uppartners.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Not a csv")
+
+    content = await uppartners.read()
+    text = content.decode("utf-8")
+    csvfile = io.StringIO(text)
+    reader = csv.DictReader(csvfile)
+    cach = []
+    for row in reader:
+        partner = Partners(
+            name=row["name"],
+            inn=row["inn"],
+            kpp=row["kpp"],
+        )
+        cach.append(partner)
+    session.add_all(cach)
+    await session.commit()
+
+    return {"status": "ok", "message": "Partners add"}
 
 
 if __name__ == "__main__":
