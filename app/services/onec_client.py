@@ -36,6 +36,21 @@ async def send_to_1c(
     url = get_target_url(target)
     auth = get_onec_auth()
 
+    if settings.ONEC_MOCK:
+        print("\n========== MOCK SEND TO 1C ==========")
+        print("target:", target)
+        print("entity:", entity)
+        print("filename:", filename)
+        print("file content:")
+        print(file_content.decode("utf-8-sig", errors="replace"))
+        print("=====================================\n")
+
+        return {
+            "status_code": 200,
+            "json": None,
+            "text": f"MOCK: file accepted. entity={entity}, filename={filename}",
+        }
+
     print("1C URL:", url)
     print("1C login:", settings.ONEC_LOGIN)
     print("1C password exists:", bool(settings.ONEC_PASSWORD))

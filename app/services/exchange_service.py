@@ -7,6 +7,40 @@ from app.db.exchange import ExchangeOperation, ExchangeFileRow
 from app.services.csv_parser import validate_required_columns
 from app.services.onec_client import send_to_1c
 
+import csv
+import io
+from typing import Any
+
+def build_dashboard_csv_bytes(
+    valid_rows_count: int,
+    invalid_rows_count: int,
+    errors: list[str],
+) -> bytes:
+    output = io.StringIO()
+
+    writer = csv.DictWriter(
+        output,
+        fieldnames=[
+            "ВерныеСтроки",
+            "НеверныеСтроки",
+            "Ошибки",
+        ],
+        delimiter=",",
+        quoting=csv.QUOTE_MINIMAL,
+        lineterminator="\n",
+    )
+
+    writer.writeheader()
+    writer.writerow(
+        {
+            "ВерныеСтроки": valid_rows_count,
+            "НеверныеСтроки": invalid_rows_count,
+            "Ошибки": ";".join(errors),
+        }
+    )
+
+    return output.getvalue().encode("utf-8-sig")
+
 from app.validators.item import (
     REQUIRED_COLUMNS as ITEM_COLUMNS,
     validate_item,
@@ -215,7 +249,7 @@ async def process_exchange(
 from app.services.onec_client import send_to_1c
 
 
-VALID_ENTITIES = {"items", "partners", "sales"}
+VALID_ENTITIES = {"items", "partners", "sales", "dashboard"}
 VALID_TARGETS = {"unf", "bp"}
 
 
@@ -238,6 +272,22 @@ async def process_exchange(
         entity=entity,
         file_content=file_content,
         filename=filename,
+    )
+    
+    dashboard_response = None
+
+    if entity != "dashboard":
+        dashboard_file_content = build_dashboard_csv_bytes(
+        valid_rows_count=len(rows),
+        invalid_rows_count=0,
+        errors=[],
+    )
+
+    dashboard_response = await send_to_1c(
+        target=target,
+        entity="dashboard",
+        file_content=dashboard_file_content,
+        filename="dashboard.csv",
     )
 
     return {

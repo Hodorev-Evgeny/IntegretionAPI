@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     ONEC_LOGIN: str | None = None
     ONEC_PASSWORD: str | None = None
     ONEC_TIMEOUT: int = 30
+    ONEC_MOCK: bool = False
 
     @property
     def DATABASE_URL(self) -> str:
