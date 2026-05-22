@@ -1,3 +1,5 @@
+import csv
+import io
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,9 +9,48 @@ from app.db.exchange import ExchangeOperation, ExchangeFileRow
 from app.services.csv_parser import validate_required_columns
 from app.services.onec_client import send_to_1c
 
-import csv
-import io
-from typing import Any
+from app.validators.item import (
+    REQUIRED_COLUMNS as ITEM_COLUMNS,
+    validate_item,
+)
+from app.validators.partners import (
+    REQUIRED_COLUMNS as PARTNER_COLUMNS,
+    validate_partner,
+)
+from app.validators.sales import (
+    REQUIRED_COLUMNS as SALES_COLUMNS,
+    validate_sale,
+)
+
+
+SOURCE_ENTITIES = {"items", "partners", "sales"}
+
+DASHBOARD_ENTITY_BY_SOURCE = {
+    "sales": "dashbordsale",
+    "items": "dashborditems",
+    "partners": "dashbordpartners",
+}
+
+DASHBOARD_ENTITIES = set(DASHBOARD_ENTITY_BY_SOURCE.values())
+
+VALID_TARGETS = {"unf", "bp"}
+
+
+VALIDATORS = {
+    "items": {
+        "required_columns": ITEM_COLUMNS,
+        "validator": validate_item,
+    },
+    "partners": {
+        "required_columns": PARTNER_COLUMNS,
+        "validator": validate_partner,
+    },
+    "sales": {
+        "required_columns": SALES_COLUMNS,
+        "validator": validate_sale,
+    },
+}
+
 
 def build_dashboard_csv_bytes(
     valid_rows_count: int,
@@ -41,37 +82,44 @@ def build_dashboard_csv_bytes(
 
     return output.getvalue().encode("utf-8-sig")
 
-from app.validators.item import (
-    REQUIRED_COLUMNS as ITEM_COLUMNS,
-    validate_item,
-)
-from app.validators.partners import (
-    REQUIRED_COLUMNS as PARTNER_COLUMNS,
-    validate_partner,
-)
-from app.validators.sales import (
-    REQUIRED_COLUMNS as SALES_COLUMNS,
-    validate_sale,
-)
+
+def build_dashboard_errors(invalid_rows: list[dict]) -> list[str]:
+    errors = []
+
+    for error in invalid_rows:
+        row = error.get("row")
+        field = error.get("field")
+        value = error.get("value")
+        message = error.get("message")
+
+        errors.append(
+            f"Строка {row}: {field}={value}({message})"
+        )
+
+    return errors
 
 
-VALIDATORS = {
-    "items": {
-        "required_columns": ITEM_COLUMNS,
-        "validator": validate_item,
-        "payload_key": "items",
-    },
-    "partners": {
-        "required_columns": PARTNER_COLUMNS,
-        "validator": validate_partner,
-        "payload_key": "partners",
-    },
-    "sales": {
-        "required_columns": SALES_COLUMNS,
-        "validator": validate_sale,
-        "payload_key": "sales",
-    },
-}
+async def send_dashboard_to_1c(
+    target: str,
+    source_entity: str,
+    valid_rows_count: int,
+    invalid_rows_count: int,
+    errors: list[str],
+) -> dict:
+    dashboard_entity = DASHBOARD_ENTITY_BY_SOURCE[source_entity]
+
+    dashboard_file_content = build_dashboard_csv_bytes(
+        valid_rows_count=valid_rows_count,
+        invalid_rows_count=invalid_rows_count,
+        errors=errors,
+    )
+
+    return await send_to_1c(
+        target=target,
+        entity=dashboard_entity,
+        file_content=dashboard_file_content,
+        filename=f"{dashboard_entity}.csv",
+    )
 
 
 async def process_exchange(
@@ -80,12 +128,36 @@ async def process_exchange(
     target: str,
     filename: str | None,
     rows: list[dict],
+    file_content: bytes,
 ) -> dict:
-    if entity not in VALIDATORS:
-        raise ValueError("Unknown entity. Use: items, partners, sales")
-
-    if target not in {"unf", "bp"}:
+    if target not in VALID_TARGETS:
         raise ValueError("Unknown target. Use: unf or bp")
+
+    filename = filename or f"{entity}.csv"
+
+    # Если напрямую отправляют dashboard-файл
+    if entity in DASHBOARD_ENTITIES:
+        result = await send_to_1c(
+            target=target,
+            entity=entity,
+            file_content=file_content,
+            filename=filename,
+        )
+
+        return {
+            "status": "ok",
+            "target": target,
+            "entity": entity,
+            "filename": filename,
+            "rows": len(rows),
+            "onec_response": result,
+        }
+
+    if entity not in SOURCE_ENTITIES:
+        allowed = sorted(SOURCE_ENTITIES | DASHBOARD_ENTITIES)
+        raise ValueError(
+            f"Unknown entity: {entity}. Use: {', '.join(allowed)}"
+        )
 
     config = VALIDATORS[entity]
 
@@ -128,12 +200,14 @@ async def process_exchange(
             )
 
         except CsvValidationError as exc:
-            invalid_rows.append({
-                "row": exc.row_number,
-                "field": exc.field,
-                "value": exc.value,
-                "message": exc.message,
-            })
+            invalid_rows.append(
+                {
+                    "row": exc.row_number,
+                    "field": exc.field,
+                    "value": exc.value,
+                    "message": exc.message,
+                }
+            )
 
             session.add(
                 ExchangeFileRow(
@@ -149,7 +223,27 @@ async def process_exchange(
     operation.valid_rows = len(validated_rows)
     operation.invalid_rows = len(invalid_rows)
 
+    # Если есть ошибки — основной файл НЕ отправляем,
+    # но отчёт в dashboard отправляем.
     if invalid_rows:
+        dashboard_errors = build_dashboard_errors(invalid_rows)
+
+        try:
+            dashboard_response = await send_dashboard_to_1c(
+                target=target,
+                source_entity=entity,
+                valid_rows_count=len(validated_rows),
+                invalid_rows_count=len(invalid_rows),
+                errors=dashboard_errors,
+            )
+        except TargetOneCError as exc:
+            dashboard_response = {
+                "status": "error",
+                "message": exc.message,
+                "status_code": exc.status_code,
+                "response_text": exc.response_text,
+            }
+
         operation.status = "validation_failed"
         operation.error_message = "CSV contains invalid rows"
         operation.finished_at = datetime.utcnow()
@@ -170,27 +264,33 @@ async def process_exchange(
                 "total_rows": operation.total_rows,
                 "valid_rows": operation.valid_rows,
                 "invalid_rows": operation.invalid_rows,
-                "sent_rows": operation.sent_rows,
+                "sent_rows": operation.sent_rows or 0,
+            },
+            "dashboard": {
+                "entity": DASHBOARD_ENTITY_BY_SOURCE[entity],
+                "response": dashboard_response,
             },
         }
 
     operation.status = "sending"
     await session.commit()
 
-    payload_key = config["payload_key"]
-
-    payload = {
-        "source": "fastapi",
-        "target": target,
-        "entity": entity,
-        payload_key: validated_rows,
-    }
-
     try:
+        # Основной CSV отправляем в 1С как есть
         result = await send_to_1c(
             target=target,
             entity=entity,
-            payload=payload,
+            file_content=file_content,
+            filename=filename,
+        )
+
+        # После успешной отправки основного файла отправляем dashboard
+        dashboard_response = await send_dashboard_to_1c(
+            target=target,
+            source_entity=entity,
+            valid_rows_count=len(validated_rows),
+            invalid_rows_count=0,
+            errors=[],
         )
 
     except TargetOneCError as exc:
@@ -219,7 +319,7 @@ async def process_exchange(
                 "total_rows": operation.total_rows,
                 "valid_rows": operation.valid_rows,
                 "invalid_rows": operation.invalid_rows,
-                "sent_rows": operation.sent_rows,
+                "sent_rows": operation.sent_rows or 0,
             },
         }
 
@@ -237,6 +337,7 @@ async def process_exchange(
         "message": "File processed and sent to target 1C",
         "target": target,
         "entity": entity,
+        "filename": filename,
         "statistics": {
             "total_rows": operation.total_rows,
             "valid_rows": operation.valid_rows,
@@ -244,57 +345,8 @@ async def process_exchange(
             "sent_rows": operation.sent_rows,
         },
         "target_response": result["json"] or result["text"],
-    }
-
-from app.services.onec_client import send_to_1c
-
-
-VALID_ENTITIES = {"items", "partners", "sales", "dashboard"}
-VALID_TARGETS = {"unf", "bp"}
-
-
-async def process_exchange(
-    session,
-    entity: str,
-    target: str,
-    filename: str,
-    rows: list[dict],
-    file_content: bytes,
-) -> dict:
-    if entity not in VALID_ENTITIES:
-        raise ValueError(f"Unknown entity: {entity}")
-
-    if target not in VALID_TARGETS:
-        raise ValueError(f"Unknown target: {target}")
-
-    result = await send_to_1c(
-        target=target,
-        entity=entity,
-        file_content=file_content,
-        filename=filename,
-    )
-    
-    dashboard_response = None
-
-    if entity != "dashboard":
-        dashboard_file_content = build_dashboard_csv_bytes(
-        valid_rows_count=len(rows),
-        invalid_rows_count=0,
-        errors=[],
-    )
-
-    dashboard_response = await send_to_1c(
-        target=target,
-        entity="dashboard",
-        file_content=dashboard_file_content,
-        filename="dashboard.csv",
-    )
-
-    return {
-        "status": "ok",
-        "target": target,
-        "entity": entity,
-        "filename": filename,
-        "rows": len(rows),
-        "onec_response": result,
+        "dashboard": {
+            "entity": DASHBOARD_ENTITY_BY_SOURCE[entity],
+            "response": dashboard_response,
+        },
     }

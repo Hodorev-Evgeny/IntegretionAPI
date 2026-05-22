@@ -41,19 +41,18 @@ async def read_csv_file(file: UploadFile) -> list[dict]:
     return rows
 
 
-def validate_required_columns(
-    rows: list[dict],
-    required_columns: set[str],
-):
+def validate_required_columns(rows, required_columns):
     if not rows:
-        return
+        raise ValueError("CSV file is empty")
 
-    first_row = rows[0]["data"]
-    existing_columns = set(first_row.keys())
+    existing_columns = set(rows[0]["data"].keys())
+    existing_columns.discard(None)
+
+    required_columns = set(required_columns)
+
     missing_columns = required_columns - existing_columns
 
     if missing_columns:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing required columns: {', '.join(sorted(missing_columns))}",
+        raise ValueError(
+            "Missing required columns: " + ", ".join(sorted(missing_columns))
         )
