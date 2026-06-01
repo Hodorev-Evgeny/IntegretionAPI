@@ -26,9 +26,9 @@ from app.validators.sales import (
 SOURCE_ENTITIES = {"items", "partners", "sales"}
 
 DASHBOARD_ENTITY_BY_SOURCE = {
-    "sales": "dashbordsale",
-    "items": "dashborditems",
-    "partners": "dashbordpartners",
+    "sales": "DashboardSales",
+    "items": "DashboardItems",
+    "partners": "DashboardPartners",
 }
 
 DASHBOARD_ENTITIES = set(DASHBOARD_ENTITY_BY_SOURCE.values())
